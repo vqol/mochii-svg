@@ -5,4 +5,7 @@
 import LibcurlClient from './lib/libcurl-transport.mjs';
 
 import './alias.mjs';
-export default LibcurlClient;
+import fallbackTransport from './fallback.mjs';
+// a request that fails on one server goes to the next (fallback.mjs). libcurl has one connection for everything, so
+// moving to another server moves all of it
+export default fallbackTransport(LibcurlClient, { shared: true });

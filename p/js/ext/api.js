@@ -22,6 +22,8 @@ function mochiiChromeApi(host, ctx) {
     };
   }
   const ev = name => events[name] || (events[name] = makeEvent(name));
+  // an enum whose values are its keys in lower case, like chrome.tabs.TabStatus
+  const en = keys => Object.fromEntries(keys.split(' ').map(k => [k, k.toLowerCase()]));
   const fire = (name, args) => { const e = events[name]; if (!e) return; for (const fn of e._list.slice()) { try { fn(...args); } catch (err) { console.error(err); } } };
 
   // calls into the host. a trailing function is a callback (with runtime.lastError set while it runs), otherwise a promise
@@ -94,7 +96,14 @@ function mochiiChromeApi(host, ctx) {
     const keys = Object.keys(data).sort((a, b) => b - a);
     return keys.length ? one(data[keys[0]]) : '';
   }
-  const iconPrep = args => { const d = Object.assign({}, args[0] || {}); if (d.imageData) { d.iconUrl = imageDataUrl(d.imageData); delete d.imageData; } return [d]; };
+  // a relative icon path is from the calling page or service worker, as in chrome ("../icons/x.png" from background/)
+  const absPath = p => { p = String(p); if (/^\/(?!\/)/.test(p)) return ctx.baseUrl + p.slice(1); try { return new URL(p, location.href).href; } catch { return p; } };
+  const iconPrep = args => {
+    const d = Object.assign({}, args[0] || {});
+    if (d.imageData) { d.iconUrl = imageDataUrl(d.imageData); delete d.imageData; }
+    else if (d.path) d.path = typeof d.path === 'string' ? absPath(d.path) : Object.fromEntries(Object.entries(d.path).map(([k, v]) => [k, absPath(v)]));
+    return [d];
+  };
   const scriptPrep = args => {
     const d = Object.assign({}, args[0] || {});
     if (typeof d.func === 'function') d.func = d.func.toString();
@@ -129,12 +138,13 @@ function mochiiChromeApi(host, ctx) {
     get lastError() { return lastError || undefined; },
     getURL, getManifest: () => clone(ctx.manifest),
     sendMessage: (...a) => typeof a[0] === 'string' && /^[a-p]{32}$/.test(a[0]) && a.length > 1 ? sendMessage({ ext: a.shift() }, a) : sendMessage({ ext: ctx.extId }, a),
-    connect: (a, b) => connect({ ext: ctx.extId }, typeof a === 'string' ? b : a),
+    connect: (a, b) => typeof a === 'string' ? connect({ ext: a }, b) : connect({ ext: ctx.extId }, a),
     onMessage: ev('runtime.onMessage'), onConnect: ev('runtime.onConnect'), onMessageExternal: ev('runtime.onMessageExternal'), onConnectExternal: ev('runtime.onConnectExternal'),
     onInstalled: ev('runtime.onInstalled'), onStartup: ev('runtime.onStartup'), onSuspend: ev('runtime.onSuspend'), onSuspendCanceled: ev('runtime.onSuspendCanceled'), onUpdateAvailable: ev('runtime.onUpdateAvailable'), onRestartRequired: ev('runtime.onRestartRequired'), onUserScriptMessage: ev('runtime.onUserScriptMessage'),
     getPlatformInfo: api('runtime.getPlatformInfo'),
     OnInstalledReason: { INSTALL: 'install', UPDATE: 'update', CHROME_UPDATE: 'chrome_update', SHARED_MODULE_UPDATE: 'shared_module_update' },
     PlatformOs: { MAC: 'mac', WIN: 'win', ANDROID: 'android', CROS: 'cros', LINUX: 'linux', OPENBSD: 'openbsd', FUCHSIA: 'fuchsia' },
+    OnRestartRequiredReason: en('APP_UPDATE OS_UPDATE PERIODIC'), RequestUpdateCheckStatus: en('THROTTLED NO_UPDATE UPDATE_AVAILABLE'), PlatformArch: { ARM: 'arm', ARM64: 'arm64', X86_32: 'x86-32', X86_64: 'x86-64', MIPS: 'mips', MIPS64: 'mips64' },
     ContextType: { TAB: 'TAB', POPUP: 'POPUP', BACKGROUND: 'BACKGROUND', OFFSCREEN_DOCUMENT: 'OFFSCREEN_DOCUMENT', SIDE_PANEL: 'SIDE_PANEL', DEVELOPER_TOOLS: 'DEVELOPER_TOOLS' }
   };
   const extension = { getURL, inIncognitoContext: false, get lastError() { return lastError || undefined; }, onRequest: ev('extension.onRequest'), sendRequest: (...a) => runtime.sendMessage(...a) };
@@ -154,12 +164,12 @@ function mochiiChromeApi(host, ctx) {
     });
     const tabs = ns('tabs', 'get getCurrent query create update remove reload duplicate highlight move discard captureVisibleTab detectLanguage getZoom setZoom getZoomSettings setZoomSettings group ungroup goBack goForward insertCSS removeCSS getSelected getAllInWindow',
       'onCreated onUpdated onActivated onRemoved onReplaced onMoved onAttached onDetached onHighlighted onZoomChange onActiveChanged onSelectionChanged', {
-        TAB_ID_NONE: -1, TAB_INDEX_NONE: -1, MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND: 2,
+        TAB_ID_NONE: -1, TAB_INDEX_NONE: -1, MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND: 2, TabStatus: en('UNLOADED LOADING COMPLETE'), WindowType: en('NORMAL POPUP PANEL APP DEVTOOLS'), MutedInfoReason: en('USER CAPTURE EXTENSION'), ZoomSettingsMode: en('AUTOMATIC MANUAL DISABLED'), ZoomSettingsScope: { PER_ORIGIN: 'per-origin', PER_TAB: 'per-tab' },
         sendMessage: (tabId, ...a) => { if (a[1] && typeof a[1] === 'object' && a.length >= 2 && typeof a[1] !== 'function') { const opts = a.splice(1, 1)[0]; return sendMessage({ tab: tabId, frameId: opts.frameId, documentId: opts.documentId }, a); } return sendMessage({ tab: tabId }, a); },
         connect: (tabId, info) => connect({ tab: tabId }, info),
         executeScript: api('tabs.executeScript')
       });
-    const windows = ns('windows', 'get getCurrent getLastFocused getAll create update remove', 'onCreated onRemoved onFocusChanged onBoundsChanged', { WINDOW_ID_NONE: -1, WINDOW_ID_CURRENT: -2 });
+    const windows = ns('windows', 'get getCurrent getLastFocused getAll create update remove', 'onCreated onRemoved onFocusChanged onBoundsChanged', { WINDOW_ID_NONE: -1, WINDOW_ID_CURRENT: -2, WindowType: en('NORMAL POPUP PANEL APP DEVTOOLS'), WindowState: en('NORMAL MINIMIZED MAXIMIZED FULLSCREEN LOCKED_FULLSCREEN'), CreateType: en('NORMAL POPUP PANEL') });
     const action = Object.assign(ns('action', 'setBadgeText getBadgeText setBadgeBackgroundColor getBadgeBackgroundColor setBadgeTextColor getBadgeTextColor setTitle getTitle setPopup getPopup enable disable isEnabled openPopup getUserSettings', 'onClicked onUserSettingsChanged'), { setIcon: api('action.setIcon', iconPrep) });
     const scripting = ns('scripting', 'insertCSS removeCSS registerContentScripts getRegisteredContentScripts unregisterContentScripts updateContentScripts', '', { executeScript: api('scripting.executeScript', scriptPrep), ExecutionWorld: { ISOLATED: 'ISOLATED', MAIN: 'MAIN' }, StyleOrigin: { AUTHOR: 'AUTHOR', USER: 'USER' } });
     const menuCreate = (props, cb) => {
@@ -208,12 +218,19 @@ function mochiiChromeApi(host, ctx) {
       permissions: ns('permissions', 'contains getAll request remove addHostAccessRequest removeHostAccessRequest', 'onAdded onRemoved'),
       commands: ns('commands', 'getAll', 'onCommand'),
       webNavigation: ns('webNavigation', 'getFrame getAllFrames', 'onBeforeNavigate onCommitted onDOMContentLoaded onCompleted onErrorOccurred onCreatedNavigationTarget onReferenceFragmentUpdated onTabReplaced onHistoryStateUpdated'),
-      webRequest: ns('webRequest', 'handlerBehaviorChanged', 'onBeforeRequest onBeforeSendHeaders onSendHeaders onHeadersReceived onAuthRequired onResponseStarted onBeforeRedirect onCompleted onErrorOccurred onActionIgnored', { MAX_HANDLER_BEHAVIOR_CHANGED_CALLS_PER_10_MINUTES: 20 }),
+      webRequest: ns('webRequest', 'handlerBehaviorChanged', 'onBeforeRequest onBeforeSendHeaders onSendHeaders onHeadersReceived onAuthRequired onResponseStarted onBeforeRedirect onCompleted onErrorOccurred onActionIgnored', {
+        MAX_HANDLER_BEHAVIOR_CHANGED_CALLS_PER_10_MINUTES: 20,
+        // the option enums (OnBeforeSendHeadersOptions.EXTRA_HEADERS and so on), which extensions read while adding listeners
+        ...Object.fromEntries([['OnBeforeRequest', 'BLOCKING REQUEST_BODY EXTRA_HEADERS'], ['OnBeforeSendHeaders', 'REQUEST_HEADERS BLOCKING EXTRA_HEADERS'], ['OnSendHeaders', 'REQUEST_HEADERS EXTRA_HEADERS'], ['OnHeadersReceived', 'BLOCKING RESPONSE_HEADERS EXTRA_HEADERS'], ['OnAuthRequired', 'RESPONSE_HEADERS BLOCKING ASYNC_BLOCKING EXTRA_HEADERS'], ['OnResponseStarted', 'RESPONSE_HEADERS EXTRA_HEADERS'], ['OnBeforeRedirect', 'RESPONSE_HEADERS EXTRA_HEADERS'], ['OnCompleted', 'RESPONSE_HEADERS EXTRA_HEADERS'], ['OnErrorOccurred', 'EXTRA_HEADERS']]
+          .map(([k, v]) => [k + 'Options', Object.fromEntries(v.split(' ').map(x => [x, x.toLowerCase().replace(/_([a-z])/g, (m, c) => c.toUpperCase())]))])),
+        ResourceType: { MAIN_FRAME: 'main_frame', SUB_FRAME: 'sub_frame', STYLESHEET: 'stylesheet', SCRIPT: 'script', IMAGE: 'image', FONT: 'font', OBJECT: 'object', XMLHTTPREQUEST: 'xmlhttprequest', PING: 'ping', CSP_REPORT: 'csp_report', MEDIA: 'media', WEBSOCKET: 'websocket', WEBBUNDLE: 'webbundle', OTHER: 'other' },
+        IgnoredActionType: { REDIRECT: 'redirect', REQUEST_HEADERS: 'request_headers', RESPONSE_HEADERS: 'response_headers', AUTH_CREDENTIALS: 'auth_credentials' }
+      }),
       sidePanel: ns('sidePanel', 'setOptions getOptions setPanelBehavior getPanelBehavior open close', 'onOpened onClosed'),
       management: ns('management', 'getSelf getAll get setEnabled uninstallSelf uninstall getPermissionWarningsById launchApp createAppShortcut', 'onInstalled onUninstalled onEnabled onDisabled'),
       downloads: ns('downloads', 'download search pause resume cancel open show showDefaultFolder erase removeFile acceptDanger setShelfEnabled setUiOptions getFileIcon', 'onCreated onErased onChanged onDeterminingFilename'),
       search: ns('search', 'query'),
-      idle: ns('idle', 'queryState setDetectionInterval getAutoLockDelay', 'onStateChanged'),
+      idle: ns('idle', 'queryState setDetectionInterval getAutoLockDelay', 'onStateChanged', { IdleState: en('ACTIVE IDLE LOCKED') }),
       fontSettings: Object.assign(stub('fontSettings'), {}),
       ttsEngine: stub('ttsEngine'), identity, cookies: stub('cookies'), history: stub('history'), bookmarks: stub('bookmarks'), privacy: stub('privacy'), proxy: stub('proxy'),
       tabCapture: stub('tabCapture'), tabGroups: stub('tabGroups'), sessions: stub('sessions'), topSites: stub('topSites'), contentSettings: stub('contentSettings'), browsingData: stub('browsingData'),
@@ -262,10 +279,11 @@ function mochiiChromeApi(host, ctx) {
 }
 
 // content scripts get a self / globalThis that hands out chrome and keeps their own globals apart from the page's,
-// which is as close to chrome's isolated world as one realm allows. also turned into a string and run in the frame
+// which is as close to chrome's isolated world as one realm allows. also turned into a string and run in the frame.
+// scope is what the scripts run inside (with), so a global one of them set on self / globalThis is a bare name to the rest
 function mochiiContentWorld(win, chrome) {
   const own = { chrome }, bound = new WeakMap();
-  return new Proxy(win, {
+  const world = new Proxy(win, {
     get(t, k) {
       if (k in own) return own[k];
       let v; try { v = Reflect.get(t, k); } catch { return undefined; }
@@ -276,6 +294,12 @@ function mochiiContentWorld(win, chrome) {
     has(t, k) { return k in own || k in t; },
     deleteProperty(t, k) { delete own[k]; return true; }
   });
+  const scope = new Proxy(own, {
+    has(o, k) { return typeof k === 'string' && k in own; },
+    get(o, k) { return k === Symbol.unscopables ? undefined : own[k]; },
+    set(o, k, v) { own[k] = v; return true; }
+  });
+  return { world, scope };
 }
 
 // extension pages: find the app above us, ask it who we are, then set up chrome and the service worker globals
@@ -289,10 +313,35 @@ function mochiiContentWorld(win, chrome) {
   const rt = mochiiChromeApi(host, ctx);
   window.__mochiiRt = rt;
   try { Object.defineProperty(window, 'chrome', { value: rt.chrome, configurable: true, writable: true }); } catch { window.chrome = rt.chrome; }
-  if (ctx.kind === 'popup' || ctx.kind === 'side') window.close = () => host.closeSurface(ctx.id);
+  if (ctx.kind === 'popup' || ctx.kind === 'side' || ctx.kind === 'options' || ctx.kind === 'tab') window.close = () => host.closeSurface(ctx.id);
+  // pages of an extension with a service worker reach it through navigator.serviceWorker, as in chrome: the worker is the
+  // hidden background frame, which takes the message (ports and all) as its own message event
+  if (ctx.kind !== 'background' && ctx.workerUrl) {
+    const toWorker = (data, transfer) => { const w = host.raw(ctx.id, 'backgroundPage'); if (w && w.__mochiiSwMessage) w.__mochiiSwMessage(data, Array.isArray(transfer) ? transfer : (transfer && transfer.transfer) || []); };
+    const active = { state: 'activated', scriptURL: ctx.workerUrl, postMessage: toWorker, onstatechange: null, addEventListener() {}, removeEventListener() {} };
+    const pageReg = { scope: ctx.baseUrl, active, installing: null, waiting: null, update: () => Promise.resolve(), unregister: () => Promise.resolve(false), addEventListener() {}, removeEventListener() {} };
+    const target = new EventTarget();
+    const swc = { controller: active, ready: Promise.resolve(pageReg), onmessage: null, oncontrollerchange: null, onmessageerror: null,
+      register: () => Promise.resolve(pageReg), getRegistration: () => Promise.resolve(pageReg), getRegistrations: () => Promise.resolve([pageReg]), startMessages() {},
+      addEventListener: (t, f, o) => target.addEventListener(t, f, o), removeEventListener: (t, f, o) => target.removeEventListener(t, f, o), dispatchEvent: e => target.dispatchEvent(e) };
+    try { Object.defineProperty(navigator, 'serviceWorker', { value: swc, configurable: true }); } catch {}
+  }
   if (ctx.kind !== 'background' || !ctx.worker) return;
   // a manifest v3 service worker runs in this page, so give it the worker globals it expects
   const base = ctx.workerUrl;
+  // fetch events: the worker answers requests for its own urls that aren't files (sw.js asks through the app)
+  const fetchers = [], addListener = window.addEventListener;
+  window.addEventListener = function (type, fn, opts) { if (type === 'fetch') { if (!fetchers.includes(fn)) fetchers.push(fn); return; } return addListener.call(this, type, fn, opts); };
+  window.__mochiiSwFetch = async (url, method) => {
+    let res = null;
+    const ev = { type: 'fetch', request: new Request(url, { method: method || 'GET' }), clientId: '', resultingClientId: '', preloadResponse: Promise.resolve(undefined), respondWith(p) { res = p; }, waitUntil() {} };
+    for (const fn of [...fetchers, self.onfetch]) { if (typeof fn !== 'function') continue; try { fn.call(self, ev); } catch (e) { console.error(e); } if (res) break; }
+    const r = res && await res;
+    if (!r) return null;
+    const redirect = r.status >= 300 && r.status < 400 ? r.headers.get('location') || '' : '';
+    return { status: r.status || 200, statusText: r.statusText || '', headers: [...r.headers], redirect, body: redirect ? null : await r.arrayBuffer() };
+  };
+  window.__mochiiSwMessage = (data, ports) => { try { self.dispatchEvent(new MessageEvent('message', { data, ports: ports || [] })); } catch (e) { console.error(e); } };
   self.importScripts = (...urls) => {
     for (const u of urls) {
       const url = new URL(u, base).href, x = new XMLHttpRequest();
